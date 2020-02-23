@@ -1,0 +1,110 @@
+import numpy as np
+import netCDF4 as nc
+import datetime as dt
+import string
+import glob
+import pickle
+import matplotlib as mpl
+from salishsea_tools import evaltools as et
+from NorthNut import vvl_interp_T_to_V, vvl_interp_T_to_U;
+import sys
+
+def getyr():
+    try:
+        yr=int(sys.argv[1])
+    except:
+        print(' no year specified')
+        raise
+    return yr
+
+def runcalcs(mod_start,mod_end,fformat0,savepath):
+    sdir='/data/eolson/results/MEOPAR/SS36runs/linkHC201812/'
+    ulines={'SJDFK':{'i':140,'j':(253,308)},
+            'SJDFW':{'i':20,'j':(360,438)},
+            'SJDFE':{'i':186,'j':(228,315)},
+            'Malaspina':{'i':187,'j':(722,746)}}
+    vlines={'Haro':{'i':(213,246),'j':305},
+            'SJC':{'i':(258,270),'j':281},
+            'Rosario':{'i':(280,311),'j':265},
+            'Discovery':{'i':(120,131),'j':737},
+            'Sutil':{'i':(138,164),'j':749}}
+
+    with nc.Dataset('/ocean/eolson/MEOPAR/NEMO-forcing/grid/mesh_mask201702_noLPE.nc') as fm:
+        tmask=np.copy(fm.variables['tmask'])
+        umask=np.copy(fm.variables['umask'])
+        vmask=np.copy(fm.variables['vmask'])
+        navlon=np.copy(fm.variables['nav_lon'])
+        navlat=np.copy(fm.variables['nav_lat'])
+        e3t_0=np.copy(fm.variables['e3t_0'])
+        e3u_0=np.copy(fm.variables['e3u_0'])
+        e3v_0=np.copy(fm.variables['e3v_0'])
+        e1t=np.copy(fm.variables['e1t'])
+        e2t=np.copy(fm.variables['e2t'])
+        e1v=np.copy(fm.variables['e1v'])
+        e2v=np.copy(fm.variables['e2v'])
+        e1u=np.copy(fm.variables['e1u'])
+        e2u=np.copy(fm.variables['e2u'])
+        gdept_1d=fm.variables['gdept_1d'][0,:]
+        e3t_1d=fm.variables['e3t_1d'][0,:]
+    tmask24=np.tile(tmask,(24,1,1,1))
+    flist=dict()
+    for var in ('ptrc_T','grid_U','grid_V'):
+        flist[var]=et.index_model_files(mod_start,mod_end,sdir,nam_fmt='nowcast',flen=1,ftype=var,tres=24)
+
+    masks=dict()
+    for ipath in vlines.keys():
+        j=vlines[ipath]['j'];i0=vlines[ipath]['i'][0];i1=vlines[ipath]['i'][1]
+        masks[ipath]=vmask[0,:,j,i0:i1]
+    for ipath in ulines.keys():
+        i=ulines[ipath]['i'];j0=ulines[ipath]['j'][0];j1=ulines[ipath]['j'][1]
+        masks[ipath]=umask[0,:,j0:j1,i]
+    varlist=('diatoms','flagellates','ciliates','ammonium','silicon','microzooplankton',
+            'dissolved_organic_nitrogen','particulate_organic_nitrogen','biogenic_silicon','nitrate')
+    Tr=dict()
+    for el in varlist:
+        Tr[el]=dict() 
+    for ii in range(0,len(flist['ptrc_T']['paths'])):
+        print('day=',ii)
+        with nc.Dataset(flist['ptrc_T']['paths'][ii]) as fp, \
+              nc.Dataset(flist['grid_U']['paths'][ii]) as fu, \
+               nc.Dataset(flist['grid_V']['paths'][ii]) as fv:
+            for var in varlist:
+                for ipath in vlines.keys():
+                    j=vlines[ipath]['j'];i0=vlines[ipath]['i'][0];i1=vlines[ipath]['i'][1]
+                    if not ipath in Tr[var].keys():
+                        Tr[var][ipath]=np.zeros((len(flist['ptrc_T']['paths']),))
+                    v_x=fv.variables['vomecrty'][:,:,j,i0:i1]
+                    e3v_x=e3v_0[:,:,j,i0:i1]
+                    e1v_x=e1v[:,j,i0:i1]
+                    no3_x=np.mean(np.ma.masked_where(tmask[:,:,j:(j+2),i0:i1]==0,fp.variables[var][:,:,j:(j+2),i0:i1]),2)
+                    no3T_x=v_x*e3v_x*e1v_x*no3_x*vmask[:,:,j,i0:i1]
+                    Tr[var][ipath][ii]=np.sum(no3T_x)*1e-3*24*3600 # modl/day
+                for ipath in ulines.keys():
+                    i=ulines[ipath]['i'];j0=ulines[ipath]['j'][0];j1=ulines[ipath]['j'][1]
+                    if not ipath in Tr[var].keys():
+                        Tr[var][ipath]=np.zeros((len(flist['ptrc_T']['paths']),))
+                    u_x=fu.variables['vozocrtx'][:,:,j0:j1,i]
+                    e3u_x=e3u_0[:,:,j0:j1,i]
+                    e2u_x=e2u[:,j0:j1,i]
+                    no3_x=np.mean(np.ma.masked_where(tmask[:,:,j0:j1,i:(i+2)]==0,fp.variables[var][:,:,j0:j1,i:(i+2)]),3)
+                    no3T_x=u_x*e3u_x*e2u_x*no3_x*umask[:,:,j0:j1,i]
+                    # m/s*m*m*mmol/m3=mmol/s; multiply by 1e-3*24*3600 to get mol/day
+                    Tr[var][ipath][ii]=np.sum(no3T_x)*1e-3*24*3600 # mol/day
+    data=dict()
+    data['mod_start']=mod_start
+    data['mod_end']=mod_end
+    data['Tr']=Tr
+    data['ulines']=ulines
+    data['vlines']=vlines
+    pickle.dump(data,open(savepath,'wb'))
+    return
+
+if __name__ == "__main__":
+    #yr = getyr();
+    #print('calcs for',yr)
+    fformat0='%Y%m%d'
+    mod_start=dt.datetime(2015,1,1)
+    mod_end=dt.datetime(2017,12,31)
+    savepath='../../save/transpLinesAllVars1dFiles'+mod_start.strftime(fformat0)+'-'+mod_end.strftime(fformat0)+'.pkl'
+    runcalcs(mod_start,mod_end,fformat0,savepath);
+    print('done')
